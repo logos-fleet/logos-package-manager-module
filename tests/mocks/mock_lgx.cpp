@@ -3,6 +3,9 @@
 #include <logos_clib_mock.h>
 #include <lgx.h>
 
+#include <cstdlib>
+#include <cstring>
+
 extern "C" {
 
 lgx_result_t lgx_keyring_add(const char* keyring_dir,
@@ -55,6 +58,12 @@ void lgx_free_keyring_list(lgx_keyring_list_t list) {
 lgx_package_t lgx_load(const char* path) {
     LOGOS_CMOCK_RECORD("lgx_load");
     (void)path;
+    // nullptr by default, which is what "unit tests never load a package" meant
+    // before signerTrust() existed. A test that needs to get PAST the load opts
+    // in with lgx_load_ok and supplies lgx_get_name / lgx_get_version; the
+    // handle itself is never dereferenced by the mock.
+    if (LOGOS_CMOCK_RETURN(bool, "lgx_load_ok"))
+        return reinterpret_cast<lgx_package_t>(1);
     return nullptr;
 }
 
@@ -71,13 +80,13 @@ const char* lgx_get_last_error(void) {
 const char* lgx_get_name(lgx_package_t pkg) {
     LOGOS_CMOCK_RECORD("lgx_get_name");
     (void)pkg;
-    return nullptr;
+    return LOGOS_CMOCK_RETURN_STRING("lgx_get_name");
 }
 
 const char* lgx_get_version(lgx_package_t pkg) {
     LOGOS_CMOCK_RECORD("lgx_get_version");
     (void)pkg;
-    return nullptr;
+    return LOGOS_CMOCK_RETURN_STRING("lgx_get_version");
 }
 
 const char* lgx_get_description(lgx_package_t pkg) {
@@ -96,6 +105,18 @@ const char** lgx_get_variants(lgx_package_t pkg) {
     LOGOS_CMOCK_RECORD("lgx_get_variants");
     (void)pkg;
     return nullptr;
+}
+
+// Identity: the input alone, no architecture aliases. Aliasing is the real
+// library's table and is asserted against it in the integration suite; a mock
+// that invented aliases would make the unit tests agree with a fiction.
+const char** lgx_variant_spellings(const char* variant) {
+    LOGOS_CMOCK_RECORD("lgx_variant_spellings");
+    const char** out = static_cast<const char**>(std::malloc(2 * sizeof(char*)));
+    if (!out) return nullptr;
+    out[0] = variant ? ::strdup(variant) : nullptr;
+    out[1] = nullptr;
+    return out;
 }
 
 void lgx_free_string_array(const char** array) {

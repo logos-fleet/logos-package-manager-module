@@ -43,9 +43,42 @@ All methods are accessible via LogosAPI from other modules and UI plugins.
 | `getInstalledPackages()` | `QVariantList` | All installed packages (modules + UI plugins) |
 | `getInstalledModules()` | `QVariantList` | Installed core modules only |
 | `getInstalledUiPlugins()` | `QVariantList` | Installed UI plugins only |
-| `getValidVariants()` | `QStringList` | Platform variants this build accepts (e.g. `["darwin-arm64-dev"]`) |
+| `getValidVariants()` | `QStringList` | Platform variants this build accepts for a package already on disk (e.g. `["darwin-arm64-dev"]`) |
 
 Each item in the scan results contains all `manifest.json` fields plus `installDir`, `mainFilePath`, and `installType` (`"embedded"` or `"user"`).
+
+### Per-variant availability
+
+What a catalog entry is allowed to **offer here**. A Store shell installs `web`
+variants and nothing else — a phone may not download native code — so most of a
+catalog is uninstallable on one, and the user is entitled to be told that in the
+entry rather than by an install that fails.
+
+| Method | Return | Description |
+|--------|--------|-------------|
+| `setInstallableVariants(variants)` | — | What this build may install **at runtime**, in preference order. A Store shell declares `["web"]`. |
+| `getInstallableVariants()` | `QStringList` | The declared set, or `getValidVariants()` when the host declared none. An explicitly **empty** declaration means nothing may be installed and does *not* fall back. |
+| `variantAvailability(variantsJson)` | `QVariantMap` | `{available, variant, availableOn[], reason}` for one package's variant list. `variant` is the one an install would use (empty when unavailable); `availableOn` is what the package *does* ship; `reason` is the sentence the entry shows. |
+| `catalogAvailability(catalogJson)` | `QVariantList` | Every catalog entry, unchanged, with an added `availability` key. |
+
+`installableVariants` is **not** `validVariants`. The latter is what the loader
+accepts for a package already on disk (a Store shell's embedded set is native and
+arrived at build time); the former is what the user may *add* at runtime. On a
+desktop they nearly coincide; on a phone they do not overlap at all, and
+conflating them is how a native-only entry acquires an install button.
+
+```
+variantAvailability('["darwin-arm64","linux-x86_64"]')   // with ["web"] installable
+  → { available: false, variant: "",
+      availableOn: ["darwin-arm64","linux-x86_64"],
+      reason: "available on macOS and Linux, not in this build" }
+```
+
+Matching goes through logos-package's variant vocabulary, so a published package
+using a legacy architecture spelling (`darwin-amd64` for `darwin-x86_64`) still
+resolves. The OS half is never aliased — that is what keeps a Windows package
+from resolving as a macOS one. A consumer build's `-dev` flavour suffix comes off
+both sides before anything is compared.
 
 ### Dependency Resolution
 
@@ -90,6 +123,38 @@ Only **one** gated flow can be pending globally (across all packages and both op
 | `setSignaturePolicy(policy)` | Set policy: `"none"`, `"warn"` (default), or `"require"` |
 | `setKeyringDirectory(dir)` | Override trusted keys directory (default: `~/.config/logos/trusted-keys/`) |
 | `verifyPackage(lgxPath)` | Standalone verification. Returns `{isSigned, signatureValid, packageValid, signerDid, signerName, signerUrl, trustedAs, error}` |
+| `signerTrust(lgxPath)` | The **signer-trust prompt** in one answer: `{name, version, signatureStatus, signerName, signerDid, signerUrl, trusted, trustedAs, policy, installable, reason, error?}` |
+
+#### `signerTrust` — the prompt and the installer, in agreement
+
+A Store shell shows who signed a package before it installs it. That prompt needs
+the signer's display **name**, their **DID** and whether the local keyring
+vouches for them, plus a fourth fact the UI cannot derive on its own: whether
+this build would install the package **at all**.
+
+`signerTrust` answers all four, and it exists rather than the caller composing
+`verifyPackage()` + `listTrustedKeys()` + the policy because that composition
+*is* the policy. A prompt showing a DID beside an Install button the installer
+would refuse is a prompt that lies; one hiding the button the installer would
+accept is a feature nobody can reach. `installable` reproduces
+`installPluginFile`'s gate in the same order, and the tests assert the verdict
+**and** the install for each case.
+
+Two things it is careful about:
+
+- **Signed is not trusted.** A name a signer chose for themselves is not
+  evidence; the keyring is what vouches. That is why the prompt shows a DID.
+- **A keyring hit over content that does not match is not trusted either.**
+  `trusted_as` is filled from the DID the signature *claims*, before anything is
+  checked — so a keyring hit alone would put a known publisher's name on somebody
+  else's code.
+
+Under `require` (the Store shell's setting) an unsigned package and a signature
+from a publisher the keyring does not know are both refused. A signature that
+does not verify, and content that is not what was signed, are refused under
+`warn` too — those are not trust *preferences*. `none` checks nothing, which is
+the nix cross-install bundler's declared opt-out and is reported as such in
+`reason` rather than looking like a clean bill of health.
 
 ### Keyring Management
 

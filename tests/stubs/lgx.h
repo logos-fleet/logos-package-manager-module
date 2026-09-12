@@ -60,6 +60,13 @@ const char*   lgx_get_manifest_json(lgx_package_t pkg);
 const char**  lgx_get_variants(lgx_package_t pkg);
 void          lgx_free_string_array(const char** array);
 
+/* Variant vocabulary — every live spelling of one variant's ARCHITECTURE half,
+ * canonical caller spelling first. variantAvailability() consults it so a
+ * published package using a legacy architecture spelling still resolves. The
+ * unit-test mock is the identity (no aliasing); the aliasing itself is asserted
+ * in the integration suite, against the real library. */
+const char**  lgx_variant_spellings(const char* variant);
+
 #ifdef __cplusplus
 }
 #endif
