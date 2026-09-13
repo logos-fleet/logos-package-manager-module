@@ -134,6 +134,11 @@ void PackageManagerLib::setUserUiPluginsDirectory(const std::string& dir) {
     (void)dir;
 }
 
+void PackageManagerLib::setInstallVariants(const std::vector<std::string>& variants) {
+    LOGOS_CMOCK_RECORD("setInstallVariants");
+    (void)variants;
+}
+
 std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, std::string& errorMsg,
                                                  bool skipIfNotNewerVersion,
                                                  std::string* installedPluginPath,

@@ -262,3 +262,49 @@ LOGOS_TEST(catalogAvailability_refuses_input_that_is_not_a_list) {
     LOGOS_ASSERT_TRUE(impl.catalogAvailability("{not json").empty());
     LOGOS_ASSERT_TRUE(impl.catalogAvailability(R"({"name":"x"})").empty());
 }
+
+// ── the declaration reaches the installer, not only the annotation ──────────
+//
+// A row that says "installable here as the 'web' variant" and an install that
+// then looks for this host's NATIVE variant is the worst shape this pair can
+// take: the App Manager offers the control, the user presses it, and the
+// library refuses a package it has just been told is available. The prompt and
+// the installer must not be able to disagree -- which is why availability is
+// answered by this module at all -- and that argument only holds if the same
+// declaration drives both.
+
+LOGOS_TEST(declaring_the_installable_variants_tells_the_library_too) {
+    auto t = LogosTestContext("package_manager");
+    PackageManagerImpl impl;
+
+    impl.setInstallableVariants({"web"});
+
+    LOGOS_ASSERT_TRUE(t.cFunctionCalled("setInstallVariants"));
+}
+
+LOGOS_TEST(an_empty_declaration_refuses_the_install_rather_than_widening_it) {
+    // PackageManagerLib reads an empty install list as "this host's own", which
+    // is the right default for every caller that never declared anything. A
+    // shell that declared EMPTY means the opposite -- nothing may be installed
+    // at run time -- so the refusal is made here, where the declaration is, and
+    // the library is never handed a list that would mean something else.
+    auto t = LogosTestContext("package_manager");
+    t.mockCFunction("installPluginFile_result").returns("/user/modules");
+    t.mockCFunction("installPluginFile_installedPath").returns("/user/modules/x");
+    t.mockCFunction("installPluginFile_error").returns("");
+    t.mockCFunction("installPluginFile_isCore").returns(true);
+
+    PackageManagerImpl impl;
+    impl.setInstallableVariants({});
+
+    const LogosMap m = impl.installPlugin("/path/to/x.lgx", false);
+
+    // `error` present and `path` empty is how installPlugin reports a refusal;
+    // InstallGate reads exactly those two.
+    LOGOS_ASSERT_TRUE(m.value("path", std::string("x")).empty());
+    LOGOS_ASSERT_FALSE(t.cFunctionCalled("installPluginFile"));
+    // Named, because a user pressing an install control that reports "no" has
+    // to be told it is this build and not this package.
+    LOGOS_ASSERT_TRUE(m.value("error", std::string()).find("installs no package")
+                      != std::string::npos);
+}

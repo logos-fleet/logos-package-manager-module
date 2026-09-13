@@ -155,6 +155,7 @@ public:
     void addEmbeddedUiPluginsDirectory(const std::string& dir);
     void setUserModulesDirectory(const std::string& dir);
     void setUserUiPluginsDirectory(const std::string& dir);
+    void setInstallVariants(const std::vector<std::string>& variants);
 
     std::string installPluginFile(const std::string& pluginPath, std::string& errorMsg,
                                   bool skipIfNotNewerVersion = false,

@@ -202,6 +202,22 @@ PackageManagerImpl::~PackageManagerImpl()
 
 LogosMap PackageManagerImpl::installPlugin(const std::string& pluginPath, bool skipIfNotNewerVersion)
 {
+    // "This build installs nothing at run time" is a configuration a shell is
+    // allowed to have, and it is the one answer the library cannot hold: an
+    // empty install list there means "this host's own variant". So it is
+    // refused here, before any bytes are read, and the reason names the BUILD
+    // rather than the package -- a user who pressed an install control is
+    // entitled to know which of the two said no.
+    if (m_installableVariants && m_installableVariants->empty()) {
+        LogosMap refusal;
+        refusal["name"] = std::filesystem::path(pluginPath).stem().string();
+        refusal["path"] = std::string();
+        refusal["isCoreModule"] = false;
+        refusal["error"] = std::string("this build installs no package at run time");
+        refusal["signatureStatus"] = std::string("unsigned");
+        return refusal;
+    }
+
     std::string errorMsg;
     std::string installedPluginPath;
     bool isCoreModule = false;
@@ -544,6 +560,19 @@ std::string joinLabels(const std::vector<std::string>& labels)
 void PackageManagerImpl::setInstallableVariants(const std::vector<std::string>& variants)
 {
     m_installableVariants = variants;
+    // AND THE LIBRARY, because otherwise the annotation and the install would
+    // answer differently: a row would read "installable here as the 'web'
+    // variant" and installPluginFile would go looking for this host's NATIVE
+    // one and refuse the package it had just advertised. One declaration, both
+    // halves -- which is the whole reason availability is answered by this
+    // module rather than by the shell.
+    //
+    // An explicitly EMPTY declaration is NOT forwarded: the library reads an
+    // empty install list as "this host's own", which is the right default for
+    // every caller that never declared anything and the opposite of what an
+    // empty declaration here means. That case is refused in installPlugin.
+    if (!variants.empty())
+        m_lib->setInstallVariants(variants);
 }
 
 std::vector<std::string> PackageManagerImpl::getInstallableVariants()
