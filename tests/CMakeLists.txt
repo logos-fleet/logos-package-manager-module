@@ -11,6 +11,12 @@ logos_test(
     TEST_SOURCES
         main.cpp
         test_package_manager.cpp
+        # Per-variant availability: two lists in, one verdict out -- no disk,
+        # no package load, so it belongs in the mocked suite.
+        test_availability.cpp
+        # The signer-trust prompt's mapping from (policy, signature state) to a
+        # verdict. Real signatures are in test_signature.cpp's integration half.
+        test_signer_trust.cpp
         package_manager_events_test.cpp
     MOCK_C_SOURCES
         mocks/mock_package_manager_lib.cpp

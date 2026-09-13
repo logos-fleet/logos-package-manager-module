@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <thread>
 #include <cstdint>
+#include <optional>
 #include <logos_json.h>
 #include <logos_module_context.h>  // LogosModuleContext base; provides `logos_events`
 
@@ -82,6 +83,61 @@ public:
 
     // Platform variants this build accepts (e.g. ["darwin-arm64-dev"] or ["darwin-arm64"])
     std::vector<std::string> getValidVariants();
+
+    // ── per-variant availability ────────────────────────────────────────────
+    //
+    // What a catalog entry is allowed to OFFER here. A Store shell installs
+    // `web` variants and nothing else — a phone may not download native code —
+    // so most of a catalog is uninstallable on one, and the user is entitled to
+    // be told that in the entry rather than by an install that fails.
+    //
+    // `installableVariants` is NOT `validVariants`. The latter is what the
+    // loader accepts for a package already on disk (a Store shell's embedded set
+    // is native and arrived at build time); the former is what the user may ADD
+    // at runtime. On a desktop they nearly coincide; on a phone they do not
+    // overlap at all, and conflating them is how a native-only entry acquires an
+    // install button.
+    //
+    // Declared by the host, in PREFERENCE order — a host listing "web" before
+    // its native variant means "prefer the container". Unset, it defaults to
+    // getValidVariants(); an explicitly EMPTY list means nothing may be
+    // installed at runtime, which is a legitimate configuration and must not
+    // fall back.
+    void setInstallableVariants(const std::vector<std::string>& variants);
+    std::vector<std::string> getInstallableVariants();
+
+    // Can this build install a package that ships `variantsJson` (the `variants`
+    // array the catalog publishes per package)? Returns
+    //   { available, variant, availableOn: [...], reason }
+    // `variant` is the one the install would use, empty when unavailable.
+    // `availableOn` is the machine-readable half — what it DOES ship — and
+    // `reason` is the sentence the entry shows ("available on macOS and Linux,
+    // not in this build").
+    //
+    // Matching goes through logos-package's variant vocabulary, so a legacy
+    // architecture spelling in a published package still resolves. The OS half
+    // is never aliased.
+    LogosMap variantAvailability(const std::string& variantsJson);
+
+    // The same decision over a whole catalog: every entry passes through with an
+    // added `availability` key. One implementation of the rule, and none in QML.
+    LogosList catalogAvailability(const std::string& catalogJson);
+
+    // ── the signer-trust prompt ─────────────────────────────────────────────
+    //
+    // Everything a "who signed this?" prompt must show, plus the one thing the
+    // UI cannot derive: whether this build would install the package at all.
+    //
+    // One call rather than verifyPackage() + listTrustedKeys() + the policy,
+    // because that composition IS the policy: a prompt showing a DID beside an
+    // Install button the installer would refuse is a prompt that lies, and one
+    // hiding the button the installer would accept is a feature nobody can
+    // reach. `installable` and `installPlugin` answer the same question.
+    //
+    // Returns { name, version, signatureStatus, signerName, signerDid,
+    //           signerUrl, trusted, trustedAs, policy, installable, reason,
+    //           error? }.
+    LogosMap signerTrust(const std::string& lgxPath);
 
     // Signature policy configuration
     void setSignaturePolicy(const std::string& policy);
@@ -258,6 +314,19 @@ private:
     void emitCancellation(const PendingAction& pa, const std::string& reason);
 
     PackageManagerLib* m_lib;
+
+    // Unset until the host declares one; getInstallableVariants() then answers
+    // from getValidVariants(). An explicit (possibly empty) declaration is
+    // stored here and takes over — which is why this is an optional and not a
+    // vector whose emptiness would be ambiguous.
+    std::optional<std::vector<std::string>> m_installableVariants;
+
+    // The policy as this module last set it, lower-cased. Mirrors what was
+    // pushed into the lib so signerTrust() can reproduce the installer's
+    // decision; the lib's own getter is absent from the unit tests' stub header,
+    // and a prompt that disagreed with the installer is the one failure that
+    // method exists to prevent. "warn" is the lib's default.
+    std::string m_signaturePolicy = "warn";
 
     // Guards m_pendingAction and the ack-timer generation/shutdown flags.
     mutable std::mutex      m_stateMutex;

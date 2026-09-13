@@ -2,10 +2,12 @@
 #include <package_manager_lib.h>
 #include <lgx.h>
 #include <algorithm>
+#include <cstring>
 #include <chrono>
 #include <filesystem>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <set>
 
 // ---------------------------------------------------------------------------
@@ -460,6 +462,255 @@ std::vector<std::string> PackageManagerImpl::getValidVariants()
     return PackageManagerLib::platformVariantsToTry();
 }
 
+// ---------------------------------------------------------------------------
+// Per-variant availability
+// ---------------------------------------------------------------------------
+//
+// Two lists in, one verdict out. No disk, no package load, no platform
+// branching -- which is what makes "a native-only entry has no install control"
+// a unit test rather than a device run.
+
+namespace {
+
+// The flavour suffix a non-portable CONSUMER build appends to its own variant
+// name. It says nothing about the package, so it comes off both sides before
+// anything is compared.
+const char kDevSuffix[] = "-dev";
+
+std::string withoutDevSuffix(const std::string& v)
+{
+    const size_t n = sizeof(kDevSuffix) - 1;
+    return (v.size() > n && v.compare(v.size() - n, n, kDevSuffix) == 0)
+         ? v.substr(0, v.size() - n)
+         : v;
+}
+
+// Every live spelling of `variant`'s ARCHITECTURE half, from logos-package's
+// vocabulary. The two catalog producers in this ecosystem disagree about how to
+// spell one (darwin-amd64 vs darwin-x86_64) while one CONSUMES the other, so a
+// consumer that compared verbatim would call an installable entry unavailable.
+// The OS half is never aliased -- that is what keeps a Windows package from
+// resolving as a macOS one.
+std::vector<std::string> variantSpellings(const std::string& variant)
+{
+    std::vector<std::string> out;
+    const char** s = lgx_variant_spellings(variant.c_str());
+    if (!s) return { variant };
+    for (int i = 0; s[i]; ++i) out.emplace_back(s[i]);
+    lgx_free_string_array(s);
+    if (out.empty()) out.push_back(variant);
+    return out;
+}
+
+// What a user calls the platform a variant names. Unknown names are returned
+// verbatim: a private target this vocabulary has never heard of is still
+// somewhere the package runs, and dropping it would UNDER-report availability.
+//
+// "ios-sim" is tested before "ios" and is deliberately a different answer.
+// Telling someone their package "runs on iOS" when only a simulator build
+// exists sends them to look for it on a phone.
+std::string platformLabel(const std::string& variant)
+{
+    struct Row { const char* prefix; const char* label; };
+    static const Row kRows[] = {
+        { "linux-",   "Linux" },
+        { "darwin-",  "macOS" },
+        { "windows-", "Windows" },
+        { "android-", "Android" },
+        { "ios-sim-", "the iOS simulator" },
+        { "ios-",     "iOS" },
+    };
+    if (variant == "web") return "the Web container";
+    for (const Row& r : kRows) {
+        const size_t n = std::strlen(r.prefix);
+        if (variant.size() > n && variant.compare(0, n, r.prefix) == 0) return r.label;
+    }
+    return variant;
+}
+
+// "A", "A and B", "A, B and C".
+std::string joinLabels(const std::vector<std::string>& labels)
+{
+    std::string out;
+    for (size_t i = 0; i < labels.size(); ++i) {
+        if (i > 0) out += (i + 1 == labels.size()) ? " and " : ", ";
+        out += labels[i];
+    }
+    return out;
+}
+
+}  // namespace
+
+void PackageManagerImpl::setInstallableVariants(const std::vector<std::string>& variants)
+{
+    m_installableVariants = variants;
+}
+
+std::vector<std::string> PackageManagerImpl::getInstallableVariants()
+{
+    // An explicitly EMPTY declaration must not fall back to the loader's native
+    // variant: "this build installs nothing at runtime" is a configuration a
+    // shell is allowed to have, and silently granting it the desktop's answer is
+    // how a phone grows an install button it cannot honour.
+    if (m_installableVariants) return *m_installableVariants;
+    return getValidVariants();
+}
+
+LogosMap PackageManagerImpl::variantAvailability(const std::string& variantsJson)
+{
+    LogosMap out;
+    out["available"]   = false;
+    out["variant"]     = "";
+    out["availableOn"] = LogosList::array();
+
+    const LogosMap parsed =
+        LogosMap::parse(variantsJson, nullptr, /*allow_exceptions=*/false);
+    if (parsed.is_discarded() || !parsed.is_array()) {
+        // Distinct from an empty list. "Ships nothing" and "we could not tell"
+        // are different facts, and the second must not render as the first.
+        out["reason"] = "the package's variant list could not be read";
+        return out;
+    }
+
+    std::vector<std::string> shipped;
+    for (const auto& v : parsed)
+        if (v.is_string()) shipped.push_back(v.get<std::string>());
+
+    if (shipped.empty()) {
+        out["reason"] = "this package declares no variant, so there is nowhere it runs";
+        return out;
+    }
+
+    // Preference order is the HOST's declaration order, not the package's: a
+    // shell that lists "web" before its native variant means "prefer the
+    // container", and iterating the package first would silently invert that.
+    for (const std::string& accepted : getInstallableVariants()) {
+        for (const std::string& spelling : variantSpellings(withoutDevSuffix(accepted))) {
+            const auto hit = std::find_if(shipped.begin(), shipped.end(),
+                [&spelling](const std::string& candidate) {
+                    return withoutDevSuffix(candidate) == spelling;
+                });
+            if (hit == shipped.end()) continue;
+            out["available"] = true;
+            out["variant"]   = *hit;
+            out["reason"]    = "installable here as the '" + *hit + "' variant";
+            return out;
+        }
+    }
+
+    LogosList elsewhere = LogosList::array();
+    std::vector<std::string> labels;
+    for (const std::string& v : shipped) {
+        elsewhere.push_back(v);
+        const std::string label = platformLabel(v);
+        // Two Windows architectures are one sentence about Windows.
+        if (std::find(labels.begin(), labels.end(), label) == labels.end())
+            labels.push_back(label);
+    }
+    out["availableOn"] = elsewhere;
+    out["reason"] = "available on " + joinLabels(labels) + ", not in this build";
+    return out;
+}
+
+LogosList PackageManagerImpl::catalogAvailability(const std::string& catalogJson)
+{
+    const LogosMap parsed =
+        LogosMap::parse(catalogJson, nullptr, /*allow_exceptions=*/false);
+    if (parsed.is_discarded() || !parsed.is_array()) return LogosList::array();
+
+    LogosList out = LogosList::array();
+    for (const auto& entry : parsed) {
+        if (!entry.is_object()) continue;
+        // ANNOTATES: the entry passes through whole. An entry that lost its
+        // report link on the way through would take the report affordance with
+        // it, and a `variants` key dropped here would make a second pass lie.
+        LogosMap annotated = entry;
+        const std::string variants = entry.contains("variants") && entry["variants"].is_array()
+                                   ? entry["variants"].dump()
+                                   : std::string("not-an-array");
+        annotated["availability"] = variantAvailability(variants);
+        out.push_back(annotated);
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// The signer-trust prompt
+// ---------------------------------------------------------------------------
+
+LogosMap PackageManagerImpl::signerTrust(const std::string& lgxPath)
+{
+    LogosMap out;
+    out["name"] = "";
+    out["version"] = "";
+    out["signatureStatus"] = "error";
+    out["signerName"] = "";
+    out["signerDid"] = "";
+    out["signerUrl"] = "";
+    out["trusted"] = false;
+    out["trustedAs"] = "";
+    out["policy"] = m_signaturePolicy;
+    out["installable"] = false;
+
+    lgx_package_t pkg = lgx_load(lgxPath.c_str());
+    if (!pkg) {
+        const char* err = lgx_get_last_error();
+        out["error"]  = std::string("Failed to load LGX package: ")
+                      + (err ? err : "unknown");
+        out["reason"] = "this file could not be read as a package";
+        return out;
+    }
+    const char* rawName    = lgx_get_name(pkg);
+    const char* rawVersion = lgx_get_version(pkg);
+    out["name"]    = rawName    ? std::string(rawName)    : std::string();
+    out["version"] = rawVersion ? std::string(rawVersion) : std::string();
+    lgx_free_package(pkg);
+
+    const auto sig = m_lib->verifyPackageSignature(lgxPath);
+    const bool valid = sig.signature_valid && sig.package_valid;
+    if (sig.is_signed) {
+        out["signatureStatus"] = valid ? std::string("signed") : std::string("invalid");
+        out["signerName"] = sig.signer_name;
+        out["signerDid"]  = sig.signer_did;
+        out["signerUrl"]  = sig.signer_url;
+        out["trustedAs"]  = sig.trusted_as;
+        // TRUSTED means the local keyring vouches for the DID *and* the
+        // signature actually verified. A keyring hit over bytes that do not
+        // match what was signed is not a trusted package, and reporting it as
+        // one would put a known publisher's name on somebody else's code.
+        out["trusted"] = valid && !sig.trusted_as.empty();
+    } else if (!sig.error.empty()) {
+        out["signatureStatus"] = "error";
+        out["error"] = sig.error;
+    } else {
+        out["signatureStatus"] = "unsigned";
+    }
+
+    // The verdict. Mirrors PackageManagerLib::installPluginFile's gate exactly,
+    // in the same order -- this method's only reason to exist is that the prompt
+    // and the installer must not be able to disagree.
+    if (m_signaturePolicy == "none") {
+        out["installable"] = true;
+        out["reason"] = "this build does not check signatures";
+    } else if (sig.is_signed && !sig.signature_valid) {
+        out["reason"] = "the signature on this package does not verify";
+    } else if (!sig.package_valid) {
+        out["reason"] = "this package's contents are not what was signed";
+    } else if (!sig.is_signed && m_signaturePolicy == "require") {
+        out["reason"] = "this package is unsigned and this build requires a signature";
+    } else if (sig.is_signed && sig.trusted_as.empty() && m_signaturePolicy == "require") {
+        out["reason"] = "signed by a key your keyring does not vouch for";
+    } else {
+        out["installable"] = true;
+        out["reason"] = sig.is_signed
+            ? (sig.trusted_as.empty()
+                   ? "signed, by a publisher you have not marked as trusted"
+                   : "signed by '" + sig.trusted_as + "', a publisher you trust")
+            : "unsigned; this build installs it with a warning";
+    }
+    return out;
+}
+
 void PackageManagerImpl::setEmbeddedModulesDirectory(const std::string& dir)
 {
     m_lib->setEmbeddedModulesDirectory(dir);
@@ -494,13 +745,23 @@ void PackageManagerImpl::setSignaturePolicy(const std::string& policy)
 {
     std::string p = policy;
     std::transform(p.begin(), p.end(), p.begin(), ::tolower);
-    if (p == "none") m_lib->setSignaturePolicy(SignaturePolicy::NONE);
-    else if (p == "warn") m_lib->setSignaturePolicy(SignaturePolicy::WARN);
-    else if (p == "require") m_lib->setSignaturePolicy(SignaturePolicy::REQUIRE);
-    else {
+    static const std::map<std::string, SignaturePolicy> kPolicies{
+        {"none",    SignaturePolicy::NONE},
+        {"warn",    SignaturePolicy::WARN},
+        {"require", SignaturePolicy::REQUIRE},
+    };
+    const auto known = kPolicies.find(p);
+    if (known == kPolicies.end()) {
         std::cerr << "PackageManagerImpl::setSignaturePolicy: invalid policy '"
                   << policy << "' - expected one of: none, warn, require\n";
+        return;
     }
+
+    m_lib->setSignaturePolicy(known->second);
+    // Mirrored into m_signaturePolicy as well as pushed into the lib, because
+    // signerTrust() has to reproduce the installer's decision and the lib's own
+    // getter is absent from the unit tests' stub header.
+    m_signaturePolicy = p;
 }
 
 void PackageManagerImpl::setKeyringDirectory(const std::string& dir)
