@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <set>
 
 // ---------------------------------------------------------------------------
@@ -585,13 +586,15 @@ LogosMap PackageManagerImpl::variantAvailability(const std::string& variantsJson
     // container", and iterating the package first would silently invert that.
     for (const std::string& accepted : getInstallableVariants()) {
         for (const std::string& spelling : variantSpellings(withoutDevSuffix(accepted))) {
-            for (const std::string& candidate : shipped) {
-                if (withoutDevSuffix(candidate) != spelling) continue;
-                out["available"] = true;
-                out["variant"]   = candidate;
-                out["reason"]    = "installable here as the '" + candidate + "' variant";
-                return out;
-            }
+            const auto hit = std::find_if(shipped.begin(), shipped.end(),
+                [&spelling](const std::string& candidate) {
+                    return withoutDevSuffix(candidate) == spelling;
+                });
+            if (hit == shipped.end()) continue;
+            out["available"] = true;
+            out["variant"]   = *hit;
+            out["reason"]    = "installable here as the '" + *hit + "' variant";
+            return out;
         }
     }
 
@@ -742,16 +745,23 @@ void PackageManagerImpl::setSignaturePolicy(const std::string& policy)
 {
     std::string p = policy;
     std::transform(p.begin(), p.end(), p.begin(), ::tolower);
+    static const std::map<std::string, SignaturePolicy> kPolicies{
+        {"none",    SignaturePolicy::NONE},
+        {"warn",    SignaturePolicy::WARN},
+        {"require", SignaturePolicy::REQUIRE},
+    };
+    const auto known = kPolicies.find(p);
+    if (known == kPolicies.end()) {
+        std::cerr << "PackageManagerImpl::setSignaturePolicy: invalid policy '"
+                  << policy << "' - expected one of: none, warn, require\n";
+        return;
+    }
+
+    m_lib->setSignaturePolicy(known->second);
     // Mirrored into m_signaturePolicy as well as pushed into the lib, because
     // signerTrust() has to reproduce the installer's decision and the lib's own
     // getter is absent from the unit tests' stub header.
-    if (p == "none") { m_lib->setSignaturePolicy(SignaturePolicy::NONE); m_signaturePolicy = p; }
-    else if (p == "warn") { m_lib->setSignaturePolicy(SignaturePolicy::WARN); m_signaturePolicy = p; }
-    else if (p == "require") { m_lib->setSignaturePolicy(SignaturePolicy::REQUIRE); m_signaturePolicy = p; }
-    else {
-        std::cerr << "PackageManagerImpl::setSignaturePolicy: invalid policy '"
-                  << policy << "' - expected one of: none, warn, require\n";
-    }
+    m_signaturePolicy = p;
 }
 
 void PackageManagerImpl::setKeyringDirectory(const std::string& dir)
