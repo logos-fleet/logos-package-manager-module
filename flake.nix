@@ -21,6 +21,21 @@
             default = "lib";
             portable = "lib-portable";
           };
+          # THE SAME LIBRARY, FOR A PHONE. `generate` stages a BUILD-platform
+          # image of logos_pm into lib/, and nothing in logos-module-builder can
+          # recompile it -- it comes from its own flake -- so the mobile Bare
+          # build asks here, per target.
+          #
+          # `legacyPackages.<buildSystem>.mobile.<target>.lib`: an iOS
+          # derivation's `system` is its BUILD platform, so the archives cannot
+          # live under `packages.<target>`. Only the two iOS targets exist;
+          # aarch64-android resolves to null and logos-module-builder refuses
+          # THAT target by name, which is the honest answer -- lgx cross-compiles
+          # for Android as a shared object, and an APK carrying liblgx.so is a
+          # question this module does not answer.
+          mobilePackages = { system, buildSystem, ... }:
+            inputs.logos-package-manager.legacyPackages.${buildSystem}.mobile.${system}.lib
+              or null;
         };
       };
       tests = {
