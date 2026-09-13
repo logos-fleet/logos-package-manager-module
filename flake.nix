@@ -34,8 +34,8 @@
           # for Android as a shared object, and an APK carrying liblgx.so is a
           # question this module does not answer.
           mobilePackages = { system, buildSystem, ... }:
-            ((inputs.logos-package-manager.legacyPackages.${buildSystem} or { }).mobile
-              or { }).${system}.lib or null;
+            inputs.logos-package-manager.legacyPackages.${buildSystem}.mobile.${system}.lib
+              or null;
         };
       };
       tests = {
