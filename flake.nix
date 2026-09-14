@@ -26,13 +26,16 @@
           # recompile it -- it comes from its own flake -- so the mobile Bare
           # build asks here, per target.
           #
-          # `legacyPackages.<buildSystem>.mobile.<target>.lib`: an iOS
+          # `legacyPackages.<buildSystem>.mobile.<target>.lib`: a CROSS
           # derivation's `system` is its BUILD platform, so the archives cannot
-          # live under `packages.<target>`. Only the two iOS targets exist;
-          # aarch64-android resolves to null and logos-module-builder refuses
-          # THAT target by name, which is the honest answer -- lgx cross-compiles
-          # for Android as a shared object, and an APK carrying liblgx.so is a
-          # question this module does not answer.
+          # live under `packages.<target>`. All three mobile targets are there,
+          # and all three are STATIC archives with lgx folded in -- iOS because
+          # it loads no dynamic library of its own, Android because logos-nix's
+          # DT_NEEDED gate refuses an unbundled liblgx.so inside an APK.
+          #
+          # `or null` stays: a target with no build is refused BY NAME by
+          # logos-module-builder, which is a better answer than a link error
+          # forty lines deep.
           mobilePackages = { system, buildSystem, ... }:
             inputs.logos-package-manager.legacyPackages.${buildSystem}.mobile.${system}.lib
               or null;
